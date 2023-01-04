@@ -4,8 +4,65 @@ import random
 import redis
 import socket
 import sys
+import logging
+from datetime import datetime
+# App Insights
+# Import required libraries for App Insights
+from opencensus.ext.azure.log_exporter import AzureLogHandler
+from opencensus.ext.azure.log_exporter import AzureEventHandler
+from opencensus.ext.azure import metrics_exporter
+from opencensus.stats import aggregation as aggregation_module
+from opencensus.stats import measure as measure_module
+from opencensus.stats import stats as stats_module
+from opencensus.stats import view as view_module
+from opencensus.tags import tag_map as tag_map_module
+from opencensus.trace import config_integration
+from opencensus.ext.azure.trace_exporter import AzureExporter
+from opencensus.trace.samplers import ProbabilitySampler
+from opencensus.trace.tracer import Tracer
+from opencensus.ext.flask.flask_middleware import FlaskMiddleware
+
+# For metrics
+stats = stats_module.stats
+view_manager = stats.view_manager
+
+# Add Logger for custom Events:
+config_integration.trace_integrations(['logging'])
+config_integration.trace_integrations(['requests'])
+# Standard Logging
+logger = logging.getLogger(__name__)
+
+handler = AzureLogHandler(connection_string='InstrumentationKey=3d0cdcc8-188a-4c26-9315-13c22702e31f;IngestionEndpoint=https://eastus-8.in.applicationinsights.azure.com/;LiveEndpoint=https://eastus.livediagnostics.monitor.azure.com/')
+handler.setFormatter(logging.Formatter('%(traceId)s %(spanId)s %(message)s'))
+
+logger.addHandler(handler)
+# Logging custom Events 
+logger.addHandler(AzureEventHandler(connection_string='InstrumentationKey=[your-guid]'))
+# Set the logging level
+logger.setLevel(logging.INFO)
+
+# Metrics
+exporter = metrics_exporter.new_metrics_exporter(
+enable_standard_metrics=True,
+connection_string='InstrumentationKey=[your-guid]')
+view_manager.register_exporter(exporter)
+
+# Tracing
+tracer = Tracer(
+ exporter=AzureExporter(
+     connection_string='InstrumentationKey=3d0cdcc8-188a-4c26-9315-13c22702e31f;IngestionEndpoint=https://eastus-8.in.applicationinsights.azure.com/;LiveEndpoint=https://eastus.livediagnostics.monitor.azure.com/'),
+     sampler=ProbabilitySampler(1.0),
+)
+
 
 app = Flask(__name__)
+
+# Requests
+middleware = FlaskMiddleware(
+ app,
+ exporter=AzureExporter(connection_string="InstrumentationKey=[your-guid]"),
+ sampler=ProbabilitySampler(rate=1.0)
+)
 
 # Load configurations from environment or config file
 app.config.from_pyfile('config_file.cfg')
@@ -24,6 +81,9 @@ if ("TITLE" in os.environ and os.environ['TITLE']):
     title = os.environ['TITLE']
 else:
     title = app.config['TITLE']
+
+# Redis Connection to a local server running on the same machine where the current Flask app is running. 
+# r = redis.Redis()
 
 # Redis configurations
 redis_server = os.environ['REDIS']
@@ -48,6 +108,9 @@ if app.config['SHOWHOST'] == "true":
 if not r.get(button1): r.set(button1,0)
 if not r.get(button2): r.set(button2,0)
 
+# Use tracer.span() to capture an event. Also, use logger.info() to send custom events to the Application Insights instance. 
+# For this purpose, you need to add custom properties to your log messages in the extra keyword argument 
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
 
@@ -55,7 +118,15 @@ def index():
 
         # Get current values
         vote1 = r.get(button1).decode('utf-8')
+        #  a telemetry item will be sent for the span "Cats Vote"
+        # Use tracer object to trace cat vote
+        with tracer.span(name="Cats Vote") as span:
+            print("Cats Vote")
+
         vote2 = r.get(button2).decode('utf-8')
+        # Use tracer object to trace dog vote
+        with tracer.span(name="Dogs Vote") as span:
+            print("Dogs Vote")
 
         # Return index with values
         return render_template("index.html", value1=int(vote1), value2=int(vote2), button1=button1, button2=button2, title=title)
@@ -68,7 +139,19 @@ def index():
             r.set(button1,0)
             r.set(button2,0)
             vote1 = r.get(button1).decode('utf-8')
+
+            properties = {'custom_dimensions': {'Cats Vote': vote1}}
+            # Use logger object to log cat vote
+            logger.info('Cats Vote', extra=properties)
+
+            #####################
+
             vote2 = r.get(button2).decode('utf-8')
+
+            properties = {'custom_dimensions': {'Dogs Vote': vote2}}
+            # Use logger object to log dog vote
+            logger.info('Dogs Vote', extra=properties)
+
             return render_template("index.html", value1=int(vote1), value2=int(vote2), button1=button1, button2=button2, title=title)
         
         else:
@@ -79,10 +162,21 @@ def index():
             
             # Get current values
             vote1 = r.get(button1).decode('utf-8')
+            properties = {'custom_dimensions': {'Cats Vote': vote1}}
+            # Use logger object to log cat vote
+            logger.info('Cats Vote', extra=properties)
+
             vote2 = r.get(button2).decode('utf-8')  
+            properties = {'custom_dimensions': {'Dogs Vote': vote2}}
+            # Use logger object to log dog vote
+            logger.info('Dogs Vote', extra=properties)
                 
             # Return results
             return render_template("index.html", value1=int(vote1), value2=int(vote2), button1=button1, button2=button2, title=title)
 
 if __name__ == "__main__":
-    app.run()
+    # comment line below when deploying to VMSS
+    # app.run() # local
+    # uncomment the line below before deployment to VMSS
+    app.run(host='0.0.0.0', threaded=True, debug=True) # remote
+    #app.run(host='localhost', port=8080, threaded=True, debug=True)
